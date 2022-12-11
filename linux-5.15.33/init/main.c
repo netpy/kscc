@@ -930,12 +930,22 @@ static void __init print_unknown_bootoptions(void)
 	memblock_free_ptr(unknown_options, len);
 }
 
+/* 与体系结构无关的通用处理入口函数，主要目的是完成内核初始化并启动祖先进程（1号进程）
+ * 内核初始化包括：锁验证器、根据处理器表示ID初始化处理器、开启cgroups子系统、设置per-cpu区域环境、
+ * 初始化VFS Cache机制、初始化内存管理、RCU、Vmalloc、scheduler、IRQs（中断向量表）、ACPI（中断可编程控制器）
+ * 一起其他很多子系统。
+ */
 asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 {
+	// 表示内核命令行的全局指针
 	char *command_line;
+	// 将包含parse_args函数通过输入字符串中的参数'name=value'，寻找特定的关键字和调用正确的处理程序。
 	char *after_dashes;
 
+	// 该函数的作用是标记内核，传入的参数init_task，其在/init/init_task.c中定义，用作第一个进程，既0号进程的task_struct
+	// 所谓标记内核，就是指：获得 task_struct 对应 的堆栈结束位置，然后在这个位置上写入 STACK_END_MAGIC
 	set_task_stack_end_magic(&init_task);
+	// 设置 boot CPU 信息，此函数在x86_64架构上是空函数。
 	smp_setup_processor_id();
 	debug_objects_early_init();
 	init_vmlinux_build_id();
@@ -951,8 +961,10 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	 */
 	boot_cpu_init();
 	page_address_init();
+	// Linux 内核的第一条打印信息：打印了Linux 的banner，实际内容是内核的版本号以及编译环境信息
 	pr_notice("%s", linux_banner);
 	early_security_init();
+	// 进入指定的体系结构的初始函数，传入的参数：内核命令行
 	setup_arch(&command_line);
 	setup_boot_config();
 	setup_command_line(command_line);
@@ -1052,6 +1064,7 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	rand_initialize();
 	add_latent_entropy();
 	add_device_randomness(command_line, strlen(command_line));
+	// 
 	boot_init_stack_canary();
 
 	time_init();
@@ -1075,6 +1088,7 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 		panic("Too many boot %s vars at `%s'", panic_later,
 		      panic_param);
 
+	// 初始化 lock validator(锁验证器)
 	lockdep_init();
 
 	/*

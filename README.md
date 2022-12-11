@@ -1,2 +1,2 @@
 # kscc
-# kernel source code somments
+# kernel source code comments

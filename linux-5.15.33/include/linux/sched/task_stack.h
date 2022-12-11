@@ -56,6 +56,9 @@ static inline unsigned long *end_of_stack(struct task_struct *p)
 #ifdef CONFIG_STACK_GROWSUP
 	return (unsigned long *)((unsigned long)task_thread_info(p) + THREAD_SIZE) - 1;
 #else
+	// task_struct和thread_info共用一个THREAD_SIZE空间的情况：
+	// 通过 task_thread_info() 函数将共用 THREAD_SIZE 空间的下一个 struct thread_info 地址作为堆栈的结束地址
+	// 注意：上下两个不同的定义去取决于栈的增长方向
 	return (unsigned long *)(task_thread_info(p) + 1);
 #endif
 }
