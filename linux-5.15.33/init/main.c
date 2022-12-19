@@ -933,7 +933,11 @@ static void __init print_unknown_bootoptions(void)
 /* 与体系结构无关的通用处理入口函数，主要目的是完成内核初始化并启动祖先进程（1号进程）
  * 内核初始化包括：锁验证器、根据处理器表示ID初始化处理器、开启cgroups子系统、设置per-cpu区域环境、
  * 初始化VFS Cache机制、初始化内存管理、RCU、Vmalloc、scheduler、IRQs（中断向量表）、ACPI（中断可编程控制器）
- * 一起其他很多子系统。
+ * 以及其他很多子系统。
+ * 参考文献:
+ * 		https://www.cnblogs.com/cslunatic/archive/2013/05/11/3072811.html
+ * 		https://blog.csdn.net/jasonactions/article/details/111715545
+ * 		https://sstar1314.github.io/Linux%E7%B3%BB%E7%BB%9F%E5%90%AF%E5%8A%A8%E6%BA%90%E4%BB%A3%E7%A0%81%E5%88%86%E6%9E%90/
  */
 asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 {
@@ -944,14 +948,19 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 
 	// 该函数的作用是标记内核，传入的参数init_task，其在/init/init_task.c中定义，用作第一个进程，既0号进程的task_struct
 	// 所谓标记内核，就是指：获得 task_struct 对应 的堆栈结束位置，然后在这个位置上写入 STACK_END_MAGIC
+	// 因为内核将进程的 thread_info 结构 与进程的内核态堆栈放在同一块空间中，所以为了防止两块数据相互覆盖，
+	// 在 thread_info 的末尾也就是堆栈的栈顶位置记录上标志，以防止堆栈 将 thread_info 的数据覆盖。
 	set_task_stack_end_magic(&init_task);
-	// 设置 boot CPU 信息，此函数在x86_64架构上是空函数。
+
+	// 设置 SMP 模型的处理器 ID.此函数在x86_64架构上是空函数。
 	smp_setup_processor_id();
 	debug_objects_early_init();
 	init_vmlinux_build_id();
 
+	// 对Control Groups进行早期的初始化,主要是对init进程的cgroups及subsystem进行初始化
 	cgroup_init_early();
 
+	// 用于禁止CPU本地中断
 	local_irq_disable();
 	early_boot_irqs_disabled = true;
 
@@ -959,32 +968,55 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	 * Interrupts are still disabled. Do necessary setups, then
 	 * enable them.
 	 */
+	// 激活第一个CPU，并通过设置cpu_mask结构体对应的bit
 	boot_cpu_init();
+	// 在支持高端内存的结构中初始化高端内存线性地址中永久映 射的全局变量，不支持高端内存的有ARM64
 	page_address_init();
-	// Linux 内核的第一条打印信息：打印了Linux 的banner，实际内容是内核的版本号以及编译环境信息
+	// Linux 内核的第一条打印信息：linux_banner 字符串保存了 linux 版本号，编译主机，GCC 版本，编译 时间等信息
 	pr_notice("%s", linux_banner);
 	early_security_init();
-	// 进入指定的体系结构的初始函数，传入的参数：内核命令行
+	// 进入指定的体系结构的初始函数，对处理器架构相关的内容进行处理，传入的参数：内核命令行，具体操作包括
+		// 获取并初始化全局处理器信息
+		// 获取fdt相关的信息，添加可用内存信息到memblock.memory，获取command_line
+		// 初始化init进程的内存结构体init_mm
+		// 由于内存子系统未初始化，创建固定映射区，用于早期IO等的页表映射
+		// 添加预留区域到memblock.reserved区域并创建CMA/DMA
+		// 为memblock.memory区域创建struct page
 	setup_arch(&command_line);
+	// 解析command_line中的bootconfig选项
 	setup_boot_config();
+	// 保存command line以备将来使用，分别保存在saved_command_line和static_command_line
 	setup_command_line(command_line);
+
+	// 设置CPU的数目
 	setup_nr_cpu_ids();
+	// 初始化使用per_cpu宏定义的静态per-cpu变量，这种变量对系统中的每个cpu都有一个独立的副本
+	// 此类变量保存在内核二进制映像的一个独立的段中。
+	// setup_per_cpu_areas的目的就是为系统的各个CPU分别创建一份这些数据的副本。
 	setup_per_cpu_areas();
+	// 函数初始化多核处理器系统中的处理器位码表
 	smp_prepare_boot_cpu();	/* arch-specific boot-cpu hooks */
+
+	// cpus_booted_once_mask 中启动过一次的 cpu 都在上面 置位为 1
+	// 设置 cpus_booted_once_mask
 	boot_cpu_hotplug_init();
 
+	// 构建zonelist，伙伴分配器从zonelist分配,从MAX_NR_ZONES开始设置到zonelist->zoneref[0]中
 	build_all_zonelists(NULL);
+	// 内存页初始化，主要是在cpu发生热插拔时将CPU管理的页面移动到空闲列表
 	page_alloc_init();
 
 	pr_notice("Kernel command line: %s\n", saved_command_line);
 	/* parameters may set static keys */
 	jump_label_init();
+	// 解析 command_line 对象，拿到 早期 参数, 参数以 kernel_param 结构体保存
 	parse_early_param();
 	after_dashes = parse_args("Booting kernel",
 				  static_command_line, __start___param,
 				  __stop___param - __start___param,
 				  -1, -1, NULL, &unknown_bootoption);
 	print_unknown_bootoptions();
+	// pase_args 函数， 解析不能被 pase_early_param 函数解析的参数
 	if (!IS_ERR_OR_NULL(after_dashes))
 		parse_args("Setting init args", after_dashes, NULL, 0, -1, -1,
 			   NULL, set_init_arg);
@@ -996,15 +1028,22 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	 * These use large bootmem allocations and must precede
 	 * kmem_cache_init()
 	 */
+	// 使用memblock_alloc分配一个启动时log缓冲区
 	setup_log_buf(0);
+	// 初始化dentry和inode的hashtable
 	vfs_caches_init_early();
+	// 对内核异常向量表进行排序
 	sort_main_extable();
+	// 对内核陷阱异常进行初始化
 	trap_init();
+	// 主要功能就是将memblock管理的空闲内存释放到伙伴系统
 	mm_init();
 
+	// ftrace子系统初始化
 	ftrace_init();
 
 	/* trace_printk can be enabled here */
+	// trace_printk被使能
 	early_trace_init();
 
 	/*
@@ -1012,17 +1051,27 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	 * timer interrupt). Full topology setup happens at smp_init()
 	 * time - but meanwhile we still have a functioning scheduler.
 	 */
+	// 在启动任何中断(比如定时器中断)之前设置调度器。完整的拓扑设置发生在smp_init()时间-但同时我们仍然有一个正常工作的调度器。
+	// 进行的工作包括：
+	// 初始化了root task group，包含每个cpu core的调度实体，调度队列，以及配额时间和调度周期；
+	// 初始化root调度域，调度域是负载均衡的基本单位；
+	// 初始化每个cpu的运行队列rq
+	// 初始化init进程的负载权值，它与运行时间相关；
+	// 初始化idle进程
+	// 此时的调度器还很脆弱，是否要禁止调度抢占？
 	sched_init();
 
 	if (WARN(!irqs_disabled(),
 		 "Interrupts were enabled *very* early, fixing it\n"))
 		local_irq_disable();
+	// 初始化内核基数树
 	radix_tree_init();
 
 	/*
 	 * Set up housekeeping before setting up workqueues to allow the unbound
 	 * workqueue to take non-housekeeping into account.
 	 */
+	// 
 	housekeeping_init();
 
 	/*
@@ -1030,27 +1079,61 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	 * early.  Work item execution depends on kthreads and starts after
 	 * workqueue_init().
 	 */
+	/* workqueue早期初始化，初始化完毕后，就可以允许创建workqueue,并允许work入队/出队, 
+	 * 但是work的执行要等到线程可以创建时才行.
+	 * workqueue_init_early主要是遍历所有cpu的worker_pool，对其执行初始化，
+	 * 将所有的worker_pool加入到unbound_pool_hash哈希表，并创建一系列system workqueue, 
+	 * 包括：system_wq， system_highpri_wq，system_long_wq，system_unbound_wq，
+	 * system_freezable_wq，system_power_efficient_wq，
+	 * system_freezable_power_efficient_wq
+	 */
 	workqueue_init_early();
 
+	// 初始化互斥访问机制
 	rcu_init();
 
 	/* Trace events are available after this */
+	// Trace events在此之后可用
 	trace_init();
 
+	// initcall_debug是一个内核参数，可以跟踪initcall，用来定位内核初始化的问题。
+	// 在cmdline中增加initcall_debug后，内核启动过程中会增加如下形式的日志，
+	// 在调用每一个init函数前有一句打印，结束后再有一句打印并且输出了该Init函数运行的时间，
+	// 通过这个信息可以用来定位启动过程中哪个init函数运行失败以及哪些init函数运行时间较长。
 	if (initcall_debug)
 		initcall_debug_enable();
 
+	// tracking context 在哪个cpu上运行
 	context_tracking_init();
 	/* init some links before init_ISA_irqs() */
+	// 初始化中断数目nr_irqs，并通过for循环为每个中断分配中断描述符irq_desc，
+	// 置位allocated_irqs表示该中断已经分配中断描述符，
+	// irq_insert_desc将分配的中断描述符插入到irq_desc_tree基数树
 	early_irq_init();
+	// 初始化中断，包括中断栈的初始化，中断控制器的初始化
 	init_IRQ();
+	// 初始化时钟滴答控制器，主要包含tick broadcart和tick nohz初始化
 	tick_init();
 	rcu_init_nohz();
+	// 初始化各个cpu core的timer. 原理是： 
+	// 通过 调用 open_softirq 软中断， 注册中断处理函数为 run_timer_softirq
 	init_timers();
 	srcu_init();
+	// 初始各个cpu core的hr timer（高精度定时器），注册hr timer软中断
 	hrtimers_init();
+	// 软中断 初始化.  调用 open_softirq 注册2个级别 TASKLET_SOFTIRQ + HI_SOFTIRQ  中断 向量
+	// 即注册tasklet和tasklet_hi软中断
 	softirq_init();
+	// 初始化资源和普通计时器,  初始化 clocksource 和 common timekeeping values
+	// timekeeping模块是一个提供时间服务的基础模块。
+	// Linux内核提供各种time line，real time clock，monotonic clock、
+	// monotonic raw clock等，timekeeping模块就是负责跟踪、维护这些timeline的，
+	// 并且向其他模块（timer相关模块、用户空间的时间服务等）提供服务，
+	// 而timekeeping模块维护timeline的基础是基于clocksource模块和tick模块。
+	// 通过tick模块的tick事件，
+	// 可以周期性的更新time line，通过clocksource模块、可以获取tick之间更精准的时间信息。
 	timekeeping_init();
+	// 
 	kfence_init();
 
 	/*
@@ -1061,21 +1144,38 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	 * - add_latent_entropy() to get any latent entropy
 	 * - adding command line entropy
 	 */
+	// 随机化相关内容的初始化，比如随机数使用的熵（entropy）
 	rand_initialize();
 	add_latent_entropy();
 	add_device_randomness(command_line, strlen(command_line));
-	// 
+	//  尽可能早地进行stack protect，防止 栈越界 canary 攻击，
 	boot_init_stack_canary();
 
+	// call  (arch/x86/kernel/time.c) x86_late_time_init 函数, 
+	// 注册 结构体 x86_init_ops 对象的  timer 属性. 
+	//  以及 时钟中断, 在后面的 late_time_init 函数中调用.           
 	time_init();
+	// 对perf_event进行初始化
 	perf_event_init();
+	// 如果开启profile监视linux性能：
+	// 在内核中创建一个/proc/profile接口，
+	// 在系统启动时用profile_init()分配好存放profile信息的内存，每条指令都有一个计数器。
 	profile_init();
+	// smp下跨cpu的函数传递初始化
 	call_function_init();
 	WARN(!irqs_disabled(), "Interrupts were enabled early\n");
 
+	// 重开中断
 	early_boot_irqs_disabled = false;
 	local_irq_enable();
 
+	/*
+ 	 *1.完善全局链表slab_caches上所有struct kmem_cache实例的缓存机制:
+ 	 *	  根据slab obj大小，给本地cpu高速缓存和每个节点shared cache重新分配内存空间，
+	 *    并释放旧缓存缓存的slab obj（free_block）和旧缓存本身(kfree)）
+	 *2.初始化全局链表slab_caches上所有struct kmem_cache实例的node数组中每个struct kmem_cache_node实例的 
+ 	 *  相关数据（主要是每个内存节点中3种类型slab 链表的初始化）
+ 	 */
 	kmem_cache_init_late();
 
 	/*
@@ -1083,12 +1183,14 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	 * we've done PCI setups etc, and console_init() must be aware of
 	 * this. But we do want output early, in case something goes wrong.
 	 */
+	// 初始化控制台，主要是执行由console_initcall宏声明的函数回调，可以显示 printk 的内容
 	console_init();
 	if (panic_later)
 		panic("Too many boot %s vars at `%s'", panic_later,
 		      panic_param);
 
-	// 初始化 lock validator(锁验证器)
+	// 初始化 lock validator(锁验证器),用于检测内核互斥机制尤其是自旋锁潜在的死锁问题。
+	// 打印锁的依赖信息
 	lockdep_init();
 
 	/*
@@ -1096,6 +1198,7 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	 * to self-test [hard/soft]-irqs on/off lock inversion bugs
 	 * too:
 	 */
+	// 当irqs被启用时需要运行这个，因为它想要自检[硬/软]-irqs打开/关闭锁反转错误:
 	locking_selftest();
 
 	/*
@@ -1104,9 +1207,12 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	 * mark the bounce buffers as decrypted so that their usage will
 	 * not cause "plain-text" data to be decrypted when accessed.
 	 */
+	// 这需要在任何设备执行可能使用SWIOTLB反弹缓冲区的DMA操作之前调用。它将把反弹缓冲区标记为解密，以便它们的使用不会导致“纯文本”数据在访问时被解密。
 	mem_encrypt_init();
 
 #ifdef CONFIG_BLK_DEV_INITRD
+	// initrd_start :  kernel启动时是否传入 initrd 参数， 传入的话 会进入 raw disk.
+
 	if (initrd_start && !initrd_below_start_ok &&
 	    page_to_pfn(virt_to_page((void *)initrd_start)) < min_low_pfn) {
 		pr_crit("initrd overwritten (0x%08lx < 0x%08lx) - disabling it.\n",
@@ -1115,46 +1221,90 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 		initrd_start = 0;
 	}
 #endif
+	// 为zone中的pageset数组的第一个元素分配内存，也就是为第一个cpu分配，系统的所有的内存域都会考虑进来。
+	// 该函数还负责设置冷热分配器的限制，在SMP系统上对应于其它CPU的pageset数组成员，将会在相应的CPU激活时初始化
 	setup_per_cpu_pageset();
+	// 初始化NUMA的内存访问策略，将所有numa节点的内存分配策略设置为MPOL_PREFERRED，即有限从指定的numa节点上分配内存
 	numa_policy_init();
+	// 
 	acpi_early_init();
 	if (late_time_init)
 		late_time_init();
+	// 初始化调度器时钟
 	sched_clock_init();
+	// 延时校准,主要计算CPU需要校准的时间，这里说的时间是CPU执行时间。如果是引导CPU，这个函数计算出来的校准时间是不需要使用的，主要使用在非引导CPU上，因为非引导CPU执行的频率不一样，导致时间计算不准确。
 	calibrate_delay();
+	// 初始化进程pid位图
 	pid_idr_init();
+	// 初始化反向映射的匿名内存，提供反向查找内存的结构指针位置，快速地回收内存。
 	anon_vma_init();
+	// 初始化EFI的接口，并进入虚拟模式。EFI是ExtensibleFirmware Interface的缩写，就是INTEL公司新开发的BIOS接口。
 #ifdef CONFIG_X86
 	if (efi_enabled(EFI_RUNTIME_SERVICES))
 		efi_enter_virtual_mode();
 #endif
+	// 线程信息的缓存初始化, 调用 kmem_cache_create 在内核内存区 创建 thread_stack cache.
 	thread_stack_cache_init();
+	// 创建任务信用系统的slab高速缓存,调用 kmem_cache_create 在内核内存区 创建 cred_jar  cache, 用于 存储 credentials.
 	cred_init();
+	// 进程创建机制 初始化, 调用 kmem_cache_create 在内核内存区 创建 task_struct cache,  set_max_threads, 关键结构体 task_struct
+	// 根据系统资源计算出最大的线程数量，存放到全局max_threads
 	fork_init();
+	// 进程创建所需的其它结构体 初始化, 调用 kmem_cache_create 在内核内存区 创建 sighand_cache/signal_cache/files_cache/fs_cache/mm_struct  cache .
 	proc_caches_init();
 	uts_ns_init();
+	// 初始化内核密钥管理系统,调用 kmem_cache_create 在内核内存区 创建 key_jar  cache .
 	key_init();
+	// 初始化安全管理框架，以便提供访问文件／登录等权限。
 	security_init();
+	// 初始化内核调试模块kdb
 	dbg_late_init();
+	// 初始化虚拟文件系统。
+	// 创建denty,inode,filp的slab高速缓存；设定支持的最大文件数量；
+	// 通过mnt_init来mount rootfs(真正的根文件系统，内核挂载的第一个文件系统）；
+	// 创建bdev_cache的slab高速缓存并注册并挂载bdev文件系统；
+	// 创建cdev_map用于管理字符设备号与字符设备的映射关系
 	vfs_caches_init();
+	// 该函数 主要是初始化 页写回 机制,:
+	// 初始化等待队列哈希表，大小为PAGE_WAIT_TABLE_SIZE，在页面不可用时，用于维护等待页面的waiters；哈希表的每个bucket代表一个等待队列，通过page地址计算哈希值，来选取waiter放入哪个等待队列。
+	// 通过page_writeback_init来调整page writeback dirty limits
 	pagecache_init();
+	// 创建信号队列slab高速缓存,调用 kmem_cache_create 在内核内存区 创建  sigqueue  cache 对象.  
 	signals_init();
+	// 为seq file创建slab高速缓存
 	seq_file_init();
+	// 初始化 proc 文件系统，主要提供内核与用户进行交互的平台，方便用户实时查看进程的信息
 	proc_root_init();
+	// 初始化nsfs,位于文件fs/nsfs.c
 	nsfs_init();
+	// 初始化 cpuset 系统, 并且 创建 /sys/fs/cgroup/cpuset 文件夹,CPUSET主要为控制组提供CPU和内存节点的管理的结构。
 	cpuset_init();
+	// 正式初始化进程控制组，主要用来为进程和其子程提供性能控制。比如限定这组进程的CPU使用率为20％。
 	cgroup_init();
+	// 初始化任务状态相关的缓存、队列和信号量。任务状态主要向用户提供任务的状态信息。
 	taskstats_init_early();
+	// 初始化每个任务延时计数。当一个任务等CPU运行，或者等IO同步时，都需要计算等待时间。
+	// 初始化代码与收集每个任务的“延迟”统计数据相关，测量它必须等待cpu、同步块io、交换等多长时间
 	delayacct_init();
 
 	poking_init();
+	// 用来检查CPU配置、FPU等是否非法使用不具备的功能。
 	check_bugs();
 
+	// 初始化ACPI电源管理。
+	// 高级配置与能源接口(ACPI)ACPI规范介绍ACPI能使软、硬件、操作系统（OS），主机板和外围设备，
+	// 依照一定的方式管理用电情况，系统硬件产生的Hot-Plug事件，让操作系统从用户的角度上直接支配即插即用设备，
+	// 不同于以往直接通过基于BIOS 的方式的管理。
 	acpi_subsystem_init();
+	// 架构相关的，acpi子系统初始化
 	arch_post_acpi_subsys_init();
 	kcsan_init();
 
 	/* Do the rest non-__init'ed, we're now alive */
+	// 调用rest_init, rest_init最重要的就是创建kernel_init进程（也就是1号进程） 和 kthreadd进程（也就是2号进程），并执行（1号进程和2号进程）对应的处理函数。
+	// kernel_init进程主要负责启动secondary core, 执行init段的初始化函数，这期间会将initrd释放到根文件系统中，并执行其中的init进程，1号进程的启动时机是2号进程创建完毕；
+	// kthreadd进程用于管理调度其它进程
+	// 0号进程在启动完kernel_init和kthreadd进程，加入到idle调度类，自身退化为idle进程
 	arch_call_rest_init();
 
 	prevent_tail_call_optimization();
